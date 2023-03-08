@@ -381,10 +381,10 @@ UTEST_R2_FORM_WITH_OP(sra, int64_t, -0x1234'5678'0000'0000LL, 33, >>)
 // -- CSR --
 UTEST_CSRI(csr_frm, DYN, RUP)
 UTEST_CSRI(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
-UTEST_CSRI(csr_fcsr, kDivideByZero | kOverflow, kUnderflow)
+UTEST_CSRI(csr_fcsr, kDivideByZero | kFPUOverflow, kUnderflow)
 UTEST_CSR(csr_frm, DYN, RUP)
 UTEST_CSR(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
-UTEST_CSR(csr_fcsr, kDivideByZero | kOverflow | (RDN << kFcsrFrmShift),
+UTEST_CSR(csr_fcsr, kDivideByZero | kFPUOverflow | (RDN << kFcsrFrmShift),
           kUnderflow | (RNE << kFcsrFrmShift))
 
 // -- RV64I --
@@ -595,6 +595,40 @@ TEST(RISCV0) {
     auto fn = [i](MacroAssembler& assm) { __ RV_li(a0, i); };
     auto res = GenAndRunTest(fn);
     CHECK_EQ(i, res);
+  }
+}
+
+TEST(RISCVLi) {
+  CcTest::InitializeVM();
+
+  FOR_INT64_INPUTS(i) {
+    auto fn = [i](MacroAssembler& assm) { __ RecursiveLi(a0, i); };
+    auto res = GenAndRunTest(fn);
+    CHECK_EQ(i, res);
+  }
+  for (int i = 0; i < 64; i++) {
+    auto fn = [i](MacroAssembler& assm) { __ RecursiveLi(a0, 1 << i); };
+    auto res = GenAndRunTest(fn);
+    CHECK_EQ(1 << i, res);
+  }
+}
+
+TEST(RISCVLiEstimate) {
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  FOR_INT64_INPUTS(i) {
+    HandleScope scope(isolate);
+    MacroAssembler assm(isolate, v8::internal::CodeObjectRequired::kYes);
+    Label a, b;
+    assm.bind(&a);
+    assm.RecordComment("V8 RV_li");
+    assm.RV_li(a0, i);
+    int count_a = assm.InstructionsGeneratedSince(&a);
+    assm.bind(&b);
+    assm.RecordComment("LLVM li");
+    assm.RecursiveLi(a0, i);
+    int count_b = assm.InstructionsGeneratedSince(&b);
+    CHECK_LE(count_a, count_b);
   }
 }
 
@@ -1178,6 +1212,28 @@ TEST(NAN_BOX) {
     auto fn = [](MacroAssembler& assm) { __ fmv_x_w(a0, fa0); };
     auto res = GenAndRunTest<uint64_t>(1234.56f, fn);
     CHECK_EQ((uint64_t)base::bit_cast<uint32_t>(1234.56f), res);
+  }
+
+  // Test NaN boxing in FMV.S
+  {
+    auto fn = [](MacroAssembler& assm) {
+      __ fmv_w_x(fa0, a0);
+      __ fmv_s(ft1, fa0);
+      __ fmv_s(fa0, ft1);
+    };
+    auto res = GenAndRunTest<uint32_t>(0x7f400000, fn);
+    CHECK_EQ((uint32_t)base::bit_cast<uint32_t>(0x7f400000), res);
+  }
+
+  // Test NaN boxing in FMV.D
+  {
+    auto fn = [](MacroAssembler& assm) {
+      __ fmv_d_x(fa0, a0);
+      __ fmv_d(ft1, fa0);
+      __ fmv_d(fa0, ft1);
+    };
+    auto res = GenAndRunTest<uint64_t>(0x7ff4000000000000, fn);
+    CHECK_EQ((uint64_t)base::bit_cast<uint64_t>(0x7ff4000000000000), res);
   }
 
   // Test FLW and FSW
@@ -1961,7 +2017,7 @@ TEST(li_estimate) {
   std::vector<int64_t> immediates = {
       -256,      -255,          0,         255,        8192,      0x7FFFFFFF,
       INT32_MIN, INT32_MAX / 2, INT32_MAX, UINT32_MAX, INT64_MAX, INT64_MAX / 2,
-      INT64_MIN};
+      INT64_MIN, 12312874234};
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
@@ -1970,7 +2026,7 @@ TEST(li_estimate) {
     Label a;
     assm.bind(&a);
     assm.RV_li(t0, p);
-    int expected_count = assm.li_estimate(p, true);
+    int expected_count = assm.RV_li_count(p, true);
     int count = assm.InstructionsGeneratedSince(&a);
     CHECK_EQ(count, expected_count);
   }
@@ -2254,11 +2310,14 @@ UTEST_RVV_VI_VX_FORM_WITH_FN(vminu_vx, 32, ARRAY_INT32, std::min<uint32_t>)
 #define UTEST_RVV_VF_VV_FORM_WITH_OP(instr_name, tested_op) \
   UTEST_RVV_VF_VV_FORM_WITH_RES(instr_name, ((rs1_fval)tested_op(rs2_fval)))
 
-#define UTEST_RVV_VF_VF_FORM_WITH_OP(instr_name, tested_op) \
-  UTEST_RVV_VF_VF_FORM_WITH_RES(instr_name, ((rs1_fval)tested_op(rs2_fval)))
+#define UTEST_RVV_VF_VF_FORM_WITH_OP(instr_name, array, tested_op) \
+  UTEST_RVV_VF_VF_FORM_WITH_RES(instr_name, array,                 \
+                                ((rs1_fval)tested_op(rs2_fval)))
+
+#define ARRAY_FLOAT compiler::ValueHelper::GetVector<float>()
 
 UTEST_RVV_VF_VV_FORM_WITH_OP(vfadd_vv, +)
-// UTEST_RVV_VF_VF_FORM_WITH_OP(vfadd_vf, ARRAY_FLOAT, +)
+UTEST_RVV_VF_VF_FORM_WITH_OP(vfadd_vf, ARRAY_FLOAT, +)
 UTEST_RVV_VF_VV_FORM_WITH_OP(vfsub_vv, -)
 // UTEST_RVV_VF_VF_FORM_WITH_OP(vfsub_vf, ARRAY_FLOAT, -)
 UTEST_RVV_VF_VV_FORM_WITH_OP(vfmul_vv, *)
@@ -2831,6 +2890,30 @@ UTEST_VCPOP_M_WITH_WIDTH(64)
 UTEST_VCPOP_M_WITH_WIDTH(32)
 UTEST_VCPOP_M_WITH_WIDTH(16)
 UTEST_VCPOP_M_WITH_WIDTH(8)
+
+TEST(RISCV_UTEST_WasmRvvS128const) {
+  if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;
+  CcTest::InitializeVM();
+  for (uint64_t x : compiler::ValueHelper::GetVector<int64_t>()) {
+    for (uint64_t y : compiler::ValueHelper::GetVector<int64_t>()) {
+      uint64_t src[2] = {x, y};
+      uint8_t vals[16];
+      volatile uint64_t result[kRvvVLEN / 64] = {0};
+      memcpy(vals, src, sizeof(vals));
+      auto fn = [vals, &result](MacroAssembler& assm) {
+        __ Push(kScratchReg);
+        __ WasmRvvS128const(v10, vals);
+        __ li(t1, Operand(int64_t(result)));
+        __ VU.set(t0, VSew::E64, Vlmul::m1);
+        __ vs(v10, t1, 0, VSew::E64);
+        __ Pop(kScratchReg);
+      };
+      GenAndRunTest(fn);
+      CHECK_EQ(result[0], x);
+      CHECK_EQ(result[1], y);
+    }
+  }
+}
 
 #undef UTEST_VCPOP_M_WITH_WIDTH
 

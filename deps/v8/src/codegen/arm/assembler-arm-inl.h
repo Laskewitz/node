@@ -66,7 +66,8 @@ void RelocInfo::apply(intptr_t delta) {
 }
 
 Address RelocInfo::target_address() {
-  DCHECK(IsCodeTargetMode(rmode_) || IsWasmCall(rmode_));
+  DCHECK(IsCodeTargetMode(rmode_) || IsWasmCall(rmode_) ||
+         IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -190,8 +191,8 @@ void Assembler::emit(Instr x) {
 }
 
 void Assembler::deserialization_set_special_target_at(
-    Address constant_pool_entry, Code code, Address target) {
-  DCHECK(!Builtins::IsIsolateIndependentBuiltin(code));
+    Address constant_pool_entry, InstructionStream code, Address target) {
+  DCHECK(!Builtins::IsIsolateIndependentBuiltin(code.code(kAcquireLoad)));
   Memory<Address>(constant_pool_entry) = target;
 }
 

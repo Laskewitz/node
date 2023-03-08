@@ -374,10 +374,10 @@ UTEST_R2_FORM_WITH_OP(sra, int32_t, -0x12340000, 17, >>)
 // -- CSR --
 UTEST_CSRI(csr_frm, DYN, RUP)
 UTEST_CSRI(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
-UTEST_CSRI(csr_fcsr, kDivideByZero | kOverflow, kUnderflow)
+UTEST_CSRI(csr_fcsr, kDivideByZero | kFPUOverflow, kUnderflow)
 UTEST_CSR(csr_frm, DYN, RUP)
 UTEST_CSR(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
-UTEST_CSR(csr_fcsr, kDivideByZero | kOverflow | (RDN << kFcsrFrmShift),
+UTEST_CSR(csr_fcsr, kDivideByZero | kFPUOverflow | (RDN << kFcsrFrmShift),
           kUnderflow | (RNE << kFcsrFrmShift))
 
 // -- RV32M Standard Extension --
@@ -475,6 +475,40 @@ UTEST_R1_FORM_WITH_RES_F(fneg_s, float, 23.5f, -23.5f)
 // UTEST_R1_FORM_WITH_RES_F(fmv_d, double, -23.5, -23.5)
 // UTEST_R1_FORM_WITH_RES_F(fabs_d, double, -23.5, 23.5)
 // UTEST_R1_FORM_WITH_RES_F(fneg_d, double, 23.5, -23.5)
+
+// Test fmv_d
+TEST(RISCV_UTEST_fmv_d_double) {
+  CcTest::InitializeVM();
+
+  double src = base::bit_cast<double>(0xC037800000000000);  // -23.5
+  double dst;
+  auto fn = [](MacroAssembler& assm) {
+    __ fld(ft0, a0, 0);
+    __ fmv_d(fa0, ft0);
+    __ fsd(fa0, a1, 0);
+  };
+  GenAndRunTest<int32_t, double*>(&src, &dst, fn);
+  CHECK_EQ(base::bit_cast<int64_t>(0xC037800000000000),
+           base::bit_cast<int64_t>(dst));
+}
+
+// Test fmv_d
+// double not a canonical NaN
+TEST(RISCV_UTEST_fmv_d_double_NAN_BOX) {
+  CcTest::InitializeVM();
+
+  int64_t src = base::bit_cast<int64_t>(0x7ff4000000000000);
+  int64_t dst;
+  auto fn = [](MacroAssembler& assm) {
+    __ fld(ft0, a0, 0);
+    __ fmv_d(fa0, ft0);
+    __ fsd(fa0, a1, 0);
+  };
+
+  GenAndRunTest<int32_t, int64_t*>(&src, &dst, fn);
+  CHECK_EQ(base::bit_cast<int64_t>(0x7ff4000000000000),
+           base::bit_cast<int64_t>(dst));
+}
 
 // Test LI
 TEST(RISCV0) {
@@ -1037,6 +1071,17 @@ TEST(NAN_BOX) {
     auto fn = [](MacroAssembler& assm) { __ fmv_x_w(a0, fa0); };
     auto res = GenAndRunTest<uint32_t>(1234.56f, fn);
     CHECK_EQ((uint32_t)base::bit_cast<uint32_t>(1234.56f), res);
+  }
+
+  // Test NaN boxing in FMV.S
+  {
+    auto fn = [](MacroAssembler& assm) {
+      __ fmv_w_x(fa0, a0);
+      __ fmv_s(ft1, fa0);
+      __ fmv_s(fa0, ft1);
+    };
+    auto res = GenAndRunTest<uint32_t>(0x7f400000, fn);
+    CHECK_EQ((uint32_t)base::bit_cast<uint32_t>(0x7f400000), res);
   }
 
   // Test FLW and FSW
@@ -1705,7 +1750,7 @@ TEST(li_estimate) {
     Label a;
     assm.bind(&a);
     assm.RV_li(t0, p);
-    int expected_count = assm.li_estimate(p, true);
+    int expected_count = assm.RV_li_count(p, true);
     int count = assm.InstructionsGeneratedSince(&a);
     CHECK_EQ(count, expected_count);
   }

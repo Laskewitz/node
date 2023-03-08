@@ -14,9 +14,7 @@
 #include "src/base/sanitizer/msan.h"
 #include "src/common/globals.h"
 #include "src/heap/base/active-system-pages.h"
-#include "src/heap/combined-heap.h"
 #include "src/heap/concurrent-marking.h"
-#include "src/heap/heap-controller.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking-inl.h"
 #include "src/heap/invalidated-slots-inl.h"
@@ -237,31 +235,36 @@ Address SpaceWithLinearArea::ComputeLimit(Address start, Address end,
                                           size_t min_size) const {
   DCHECK_GE(end - start, min_size);
 
+  // During GCs we always use the full LAB.
+  if (heap()->IsInGC()) return end;
+
   if (!allocation_info_.enabled()) {
     // LABs are disabled, so we fit the requested area exactly.
     return start + min_size;
   }
 
+  // When LABs are enabled, pick the largest possible LAB size by default.
+  size_t step_size = end - start;
+
   if (SupportsAllocationObserver() && allocation_counter_.IsActive()) {
     // Ensure there are no unaccounted allocations.
     DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
 
-    // Generated code may allocate inline from the linear allocation area for.
-    // To make sure we can observe these allocations, we use a lower ©limit.
     size_t step = allocation_counter_.NextBytes();
     DCHECK_NE(step, 0);
-    size_t rounded_step =
-        RoundSizeDownToObjectAlignment(static_cast<int>(step - 1));
-    // Use uint64_t to avoid overflow on 32-bit
-    uint64_t step_end =
-        static_cast<uint64_t>(start) + std::max(min_size, rounded_step);
-    uint64_t new_end = std::min(step_end, static_cast<uint64_t>(end));
-    return static_cast<Address>(new_end);
+    // Generated code may allocate inline from the linear allocation area. To
+    // make sure we can observe these allocations, we use a lower limit.
+    size_t rounded_step = static_cast<size_t>(
+        RoundSizeDownToObjectAlignment(static_cast<int>(step - 1)));
+    step_size = std::min(step_size, rounded_step);
   }
 
-  // LABs are enabled and no observers attached. Return the whole node for the
-  // LAB.
-  return end;
+  if (v8_flags.stress_marking) {
+    step_size = std::min(step_size, static_cast<size_t>(64));
+  }
+
+  DCHECK_LE(start + step_size, end);
+  return start + std::max(step_size, min_size);
 }
 
 void SpaceWithLinearArea::DisableInlineAllocation() {
@@ -269,7 +272,6 @@ void SpaceWithLinearArea::DisableInlineAllocation() {
 
   allocation_info_.SetEnabled(false);
   FreeLinearAllocationArea();
-  UpdateInlineAllocationLimit(0);
 }
 
 void SpaceWithLinearArea::EnableInlineAllocation() {
@@ -277,7 +279,6 @@ void SpaceWithLinearArea::EnableInlineAllocation() {
 
   allocation_info_.SetEnabled(true);
   AdvanceAllocationObservers();
-  UpdateInlineAllocationLimit(0);
 }
 
 void SpaceWithLinearArea::UpdateAllocationOrigins(AllocationOrigin origin) {
@@ -335,7 +336,7 @@ void SpaceWithLinearArea::AddAllocationObserver(AllocationObserver* observer) {
   if (!allocation_counter_.IsStepInProgress()) {
     AdvanceAllocationObservers();
     Space::AddAllocationObserver(observer);
-    UpdateInlineAllocationLimit(0);
+    UpdateInlineAllocationLimit();
   } else {
     Space::AddAllocationObserver(observer);
   }
@@ -346,7 +347,7 @@ void SpaceWithLinearArea::RemoveAllocationObserver(
   if (!allocation_counter_.IsStepInProgress()) {
     AdvanceAllocationObservers();
     Space::RemoveAllocationObserver(observer);
-    UpdateInlineAllocationLimit(0);
+    UpdateInlineAllocationLimit();
   } else {
     Space::RemoveAllocationObserver(observer);
   }
@@ -360,7 +361,7 @@ void SpaceWithLinearArea::PauseAllocationObservers() {
 void SpaceWithLinearArea::ResumeAllocationObservers() {
   Space::ResumeAllocationObservers();
   MarkLabStartInitialized();
-  UpdateInlineAllocationLimit(0);
+  UpdateInlineAllocationLimit();
 }
 
 void SpaceWithLinearArea::AdvanceAllocationObservers() {
@@ -456,6 +457,29 @@ int MemoryChunk::FreeListsLength() {
     }
   }
   return length;
+}
+
+SpaceIterator::SpaceIterator(Heap* heap)
+    : heap_(heap), current_space_(FIRST_MUTABLE_SPACE) {}
+
+SpaceIterator::~SpaceIterator() = default;
+
+bool SpaceIterator::HasNext() {
+  while (current_space_ <= LAST_MUTABLE_SPACE) {
+    Space* space = heap_->space(current_space_);
+    if (space) return true;
+    ++current_space_;
+  }
+
+  // No more spaces left.
+  return false;
+}
+
+Space* SpaceIterator::Next() {
+  DCHECK_LE(current_space_, LAST_MUTABLE_SPACE);
+  Space* space = heap_->space(current_space_++);
+  DCHECK_NOT_NULL(space);
+  return space;
 }
 
 }  // namespace internal

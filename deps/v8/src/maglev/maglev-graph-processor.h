@@ -40,7 +40,7 @@ namespace maglev {
 //   // overloading as appropriate to group node processing.
 //   void Process(FooNode* node, const ProcessingState& state) {}
 //
-template <typename NodeProcessor>
+template <typename NodeProcessor, bool visit_identity_nodes = false>
 class GraphProcessor;
 
 class ProcessingState {
@@ -58,7 +58,7 @@ class ProcessingState {
   BlockConstIterator block_it_;
 };
 
-template <typename NodeProcessor>
+template <typename NodeProcessor, bool visit_identity_nodes>
 class GraphProcessor {
  public:
   template <typename... Args>
@@ -89,6 +89,10 @@ class GraphProcessor {
     for (const auto& [index, constant] : graph->float64()) {
       node_processor_.Process(constant, GetCurrentState());
       USE(index);
+    }
+    for (const auto& [address, constant] : graph->external_references()) {
+      node_processor_.Process(constant, GetCurrentState());
+      USE(address);
     }
 
     for (block_it_ = graph->begin(); block_it_ != graph->end(); ++block_it_) {
@@ -122,10 +126,14 @@ class GraphProcessor {
 
   void ProcessNodeBase(NodeBase* node, const ProcessingState& state) {
     switch (node->opcode()) {
-#define CASE(OPCODE)                                      \
-  case Opcode::k##OPCODE:                                 \
-    PreProcess(node->Cast<OPCODE>(), state);              \
-    node_processor_.Process(node->Cast<OPCODE>(), state); \
+#define CASE(OPCODE)                                        \
+  case Opcode::k##OPCODE:                                   \
+    if constexpr (!visit_identity_nodes &&                  \
+                  Opcode::k##OPCODE == Opcode::kIdentity) { \
+      return;                                               \
+    }                                                       \
+    PreProcess(node->Cast<OPCODE>(), state);                \
+    node_processor_.Process(node->Cast<OPCODE>(), state);   \
     break;
       NODE_BASE_LIST(CASE)
 #undef CASE

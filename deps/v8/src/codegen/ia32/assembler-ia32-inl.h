@@ -53,8 +53,10 @@ bool CpuFeatures::SupportsOptimizer() { return true; }
 void RelocInfo::apply(intptr_t delta) {
   DCHECK_EQ(kApplyMask, (RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
                          RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
-                         RelocInfo::ModeMask(RelocInfo::OFF_HEAP_TARGET)));
-  if (IsCodeTarget(rmode_) || IsOffHeapTarget(rmode_)) {
+                         RelocInfo::ModeMask(RelocInfo::OFF_HEAP_TARGET) |
+                         RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL)));
+  if (IsCodeTarget(rmode_) || IsOffHeapTarget(rmode_) ||
+      IsWasmStubCall(rmode_)) {
     base::WriteUnalignedValue(pc_,
                               base::ReadUnalignedValue<int32_t>(pc_) - delta);
   } else if (IsInternalReference(rmode_)) {
@@ -65,7 +67,7 @@ void RelocInfo::apply(intptr_t delta) {
 }
 
 Address RelocInfo::target_address() {
-  DCHECK(IsCodeTarget(rmode_) || IsWasmCall(rmode_));
+  DCHECK(IsCodeTarget(rmode_) || IsWasmCall(rmode_) || IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -188,7 +190,7 @@ void Assembler::emit(const Immediate& x) {
 void Assembler::emit_code_relative_offset(Label* label) {
   if (label->is_bound()) {
     int32_t pos;
-    pos = label->pos() + Code::kHeaderSize - kHeapObjectTag;
+    pos = label->pos() + InstructionStream::kHeaderSize - kHeapObjectTag;
     emit(pos);
   } else {
     emit_disp(label, Displacement::CODE_RELATIVE);
@@ -222,7 +224,7 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
 }
 
 void Assembler::deserialization_set_special_target_at(
-    Address instruction_payload, Code code, Address target) {
+    Address instruction_payload, InstructionStream code, Address target) {
   set_target_address_at(instruction_payload,
                         !code.is_null() ? code.constant_pool() : kNullAddress,
                         target);
